@@ -113,3 +113,70 @@ class TestHookExecution(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEndPhaseTriggers(unittest.TestCase):
+    def flow(self, work_ok, extra_triggers=("on_failure", "on_success", "finally")):
+        steps = [{"name": "work",
+                  "command": "true" if work_ok else "false"}]
+        for trig in extra_triggers:
+            steps.append({"name": trig.replace("_", "-"),
+                          "command": "true", "trigger": trig})
+        return load_flow({"name": "f", "steps": steps})
+
+    def test_each_trigger_fires_on_its_outcome(self):
+        result = run_flow(self.flow(work_ok=True), backoff_seconds=0)
+        by_name = {r.name: r for r in result.results}
+        self.assertEqual(by_name["on-failure"].status, "skipped")
+        self.assertEqual(by_name["on-success"].status, "succeeded")
+        self.assertEqual(by_name["finally"].status, "succeeded")
+
+    def test_each_trigger_fires_on_failure(self):
+        result = run_flow(self.flow(work_ok=False), backoff_seconds=0)
+        by_name = {r.name: r for r in result.results}
+        self.assertEqual(by_name["on-failure"].status, "succeeded")
+        self.assertEqual(by_name["on-success"].status, "skipped")
+        self.assertEqual(by_name["finally"].status, "succeeded")
+
+    def test_results_carry_each_trigger(self):
+        result = run_flow(self.flow(work_ok=True), backoff_seconds=0)
+        self.assertEqual({r.name: r.trigger for r in result.results},
+                         {"work": "always", "on-failure": "on_failure",
+                          "on-success": "on_success", "finally": "finally"})
+
+    def test_cross_hook_dependencies_allowed(self):
+        flow = load_flow({"name": "f", "steps": [
+            {"name": "work", "command": "false"},
+            {"name": "cleanup", "command": "true", "trigger": "finally"},
+            {"name": "notify", "command": "true", "trigger": "on_failure",
+             "depends_on": ["cleanup"]},
+        ]})
+        result = run_flow(flow, backoff_seconds=0)
+        by_name = {r.name: r for r in result.results}
+        self.assertEqual(by_name["cleanup"].status, "succeeded")
+        self.assertEqual(by_name["notify"].status, "succeeded")
+
+    def test_gated_off_hook_cascades_to_dependents(self):
+        flow = load_flow({"name": "f", "steps": [
+            {"name": "work", "command": "true"},  # green run
+            {"name": "page", "command": "true", "trigger": "on_failure"},
+            {"name": "after-page", "command": "true", "trigger": "finally",
+             "depends_on": ["page"]},
+        ]})
+        result = run_flow(flow, backoff_seconds=0)
+        by_name = {r.name: r for r in result.results}
+        self.assertEqual(by_name["page"].status, "skipped")
+        self.assertEqual(by_name["after-page"].status, "skipped")
+
+    def test_failed_finally_marks_flow_failed(self):
+        flow = load_flow({"name": "f", "steps": [
+            {"name": "work", "command": "true"},
+            {"name": "cleanup", "command": "false", "trigger": "finally"},
+        ]})
+        result = run_flow(flow, backoff_seconds=0)
+        self.assertEqual(result.status, "failed")
+
+    def test_bad_trigger_value_still_rejected(self):
+        with self.assertRaises(FlowError):
+            load_flow({"name": "f", "steps": [
+                {"name": "a", "command": "true", "trigger": "weekends"}]})
