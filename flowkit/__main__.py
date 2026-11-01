@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="validate and print the execution plan without running")
     parser.add_argument("--backoff", type=float, default=0.5, metavar="SECONDS",
                         help="base backoff between retries (doubles each attempt)")
+    parser.add_argument("--jobs", type=int, default=1, metavar="N",
+                        help="run up to N independent steps concurrently")
     args = parser.parse_args(argv)
 
     try:
@@ -43,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: invalid flow: {exc}", file=sys.stderr)
         return 2
 
+    if args.jobs < 1:
+        print("error: --jobs must be >= 1", file=sys.stderr)
+        return 2
     if args.dry_run:
         print(f"Flow {flow.name!r}: {len(flow.steps)} steps, execution order:")
         for step in topo_order(flow):
@@ -50,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {step.name}{deps}")
         return 0
 
-    result = run_flow(flow, backoff_seconds=args.backoff)
+    result = run_flow(flow, backoff_seconds=args.backoff, jobs=args.jobs)
     if args.json:
         print(json.dumps(result_payload(result), indent=2))
     else:
