@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from flowkit.model import load_flow
@@ -80,6 +81,58 @@ class TestRunFlow(unittest.TestCase):
             {"name": "a", "command": "exit 0"},
         ]), backoff_seconds=0)
         self.assertEqual([r.name for r in result.results], ["z", "a"])
+
+
+class TestRunFlowParallel(unittest.TestCase):
+    def test_independent_steps_run_concurrently(self):
+        started = time.monotonic()
+        result = run_flow(flow([
+            {"name": "a", "command": "exec sleep 0.4"},
+            {"name": "b", "command": "exec sleep 0.4"},
+        ]), backoff_seconds=0, jobs=2)
+        duration = time.monotonic() - started
+        self.assertEqual(result.status, "succeeded")
+        self.assertLess(duration, 0.75)  # sequential would take ~0.8s
+
+    def test_results_stay_in_declaration_order(self):
+        result = run_flow(flow([
+            {"name": "slow", "command": "exec sleep 0.3"},
+            {"name": "fast", "command": "exit 0"},
+        ]), backoff_seconds=0, jobs=2)
+        self.assertEqual([r.name for r in result.results], ["slow", "fast"])
+
+    def test_dependency_waits_for_its_step(self):
+        result = run_flow(flow([
+            {"name": "a", "command": "exec sleep 0.3"},
+            {"name": "b", "command": "exit 0", "depends_on": ["a"]},
+            {"name": "c", "command": "exit 0"},
+        ]), backoff_seconds=0, jobs=3)
+        self.assertEqual([r.status for r in result.results],
+                         ["succeeded", "succeeded", "succeeded"])
+
+    def test_fail_fast_stops_new_work(self):
+        result = run_flow(flow([
+            {"name": "a", "command": "exit 1"},
+            {"name": "b", "command": "exec sleep 0.3"},
+            {"name": "c", "command": "exit 0"},
+        ]), backoff_seconds=0, jobs=2)
+        by_name = {r.name: r for r in result.results}
+        self.assertEqual(by_name["a"].status, "failed")
+        self.assertEqual(by_name["b"].status, "succeeded")  # already running: finishes
+        self.assertEqual(by_name["c"].status, "skipped")    # never scheduled
+
+    def test_continue_on_error_keeps_scheduling(self):
+        result = run_flow(flow([
+            {"name": "a", "command": "exit 1", "continue_on_error": True},
+            {"name": "b", "command": "exec sleep 0.2"},
+            {"name": "c", "command": "exit 0"},
+        ]), backoff_seconds=0, jobs=2)
+        by_name = {r.name: r for r in result.results}
+        self.assertEqual(by_name["c"].status, "succeeded")
+
+    def test_jobs_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            run_flow(flow([{"name": "a", "command": "exit 0"}]), jobs=0)
 
 
 if __name__ == "__main__":
