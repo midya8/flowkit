@@ -188,3 +188,57 @@ class TestMissingVars(unittest.TestCase):
         f = load_flow({"name": "t", "env": {"FK_A": "1"},
                        "steps": [{"name": "a", "command": "run $FK_A ${FK_B:-x}"}]})
         self.assertEqual(missing_vars(f, base={}), {})
+
+
+class TestWhenConditions(unittest.TestCase):
+    def _flow(self):
+        return load_flow({"name": "t", "steps": [
+            {"name": "a", "command": "exit 0"},
+            {"name": "b", "command": "exit 0", "depends_on": ["a"],
+             "when": {"env": "FK_GO", "equals": "yes"}},
+            {"name": "c", "command": "exit 0", "depends_on": ["b"]},
+        ]})
+
+    def test_false_condition_skips_step_and_dependents(self):
+        result = run_flow(self._flow(), backoff_seconds=0, env={})
+        statuses = {r.name: r.status for r in result.results}
+        self.assertEqual(statuses, {"a": "succeeded", "b": "skipped", "c": "skipped"})
+        self.assertEqual(result.status, "succeeded")  # a conditional skip is not a failure
+
+    def test_true_condition_runs(self):
+        result = run_flow(self._flow(), backoff_seconds=0, env={"FK_GO": "yes"})
+        self.assertTrue(all(r.status == "succeeded" for r in result.results))
+
+    def test_condition_sees_flow_and_step_env(self):
+        f = load_flow({"name": "t", "env": {"FK_GO": "yes"}, "steps": [
+            {"name": "b", "command": "exit 0", "when": {"env": "FK_GO", "equals": "yes"}}]})
+        result = run_flow(f, backoff_seconds=0, env={})
+        self.assertEqual(result.results[0].status, "succeeded")
+
+
+class TestStepSelection(unittest.TestCase):
+    def _flow(self):
+        return flow([
+            {"name": "a", "command": "exit 0"},
+            {"name": "b", "command": "exit 0", "depends_on": ["a"]},
+            {"name": "c", "command": "exit 0"},
+        ])
+
+    def test_only_pulls_in_transitive_dependencies(self):
+        result = run_flow(self._flow(), backoff_seconds=0, only={"b"})
+        statuses = {r.name: r.status for r in result.results}
+        self.assertEqual(statuses, {"a": "succeeded", "b": "succeeded", "c": "skipped"})
+        self.assertEqual(result.status, "succeeded")
+
+    def test_skip_cascades_to_dependents(self):
+        result = run_flow(self._flow(), backoff_seconds=0, skip={"a"})
+        statuses = {r.name: r.status for r in result.results}
+        self.assertEqual(statuses, {"a": "skipped", "b": "skipped", "c": "succeeded"})
+        self.assertEqual(result.status, "succeeded")
+
+    def test_unknown_selection_names_rejected(self):
+        from flowkit.runner import selected_steps
+        with self.assertRaises(ValueError):
+            selected_steps(self._flow(), only={"ghost"})
+        with self.assertRaises(ValueError):
+            selected_steps(self._flow(), skip={"ghost"})
