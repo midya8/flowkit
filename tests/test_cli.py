@@ -77,3 +77,67 @@ class TestJobsFlag(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOutputReporting(unittest.TestCase):
+    def test_failed_step_shows_its_output(self):
+        payload = {"name": "demo", "steps": [
+            {"name": "a", "command": "echo boom-detail; exit 1"}]}
+        code, out = run(["--backoff", "0"], payload)
+        self.assertEqual(code, 1)
+        self.assertIn("boom-detail", out)
+
+    def test_successful_output_hidden_by_default(self):
+        payload = {"name": "demo", "steps": [
+            {"name": "a", "command": "echo quiet-detail"}]}
+        code, out = run([], payload)
+        self.assertEqual(code, 0)
+        self.assertNotIn("quiet-detail", out)
+
+    def test_show_output_reveals_successful_output(self):
+        payload = {"name": "demo", "steps": [
+            {"name": "a", "command": "echo loud-detail"}]}
+        code, out = run(["--show-output"], payload)
+        self.assertEqual(code, 0)
+        self.assertIn("loud-detail", out)
+
+    def test_json_payload_includes_output(self):
+        code, out = run(["--json"], {"name": "demo", "steps": [
+            {"name": "a", "command": "echo payload-detail"}]})
+        self.assertEqual(code, 0)
+        self.assertIn("payload-detail", json.loads(out)["steps"][0]["output"])
+
+
+class TestStrictEnv(unittest.TestCase):
+    def test_unset_variable_fails_before_running(self):
+        payload = {"name": "demo", "steps": [
+            {"name": "a", "command": "touch should-not-happen-$FK_NOPE"}]}
+        code, _ = run(["--strict-env"], payload)
+        self.assertEqual(code, 2)
+
+    def test_default_or_env_satisfies_strict_mode(self):
+        payload = {"name": "demo", "steps": [
+            {"name": "a", "command": "echo ${FK_MAYBE:-fine}"}]}
+        code, _ = run(["--strict-env"], payload)
+        self.assertEqual(code, 0)
+
+
+class TestReportFile(unittest.TestCase):
+    def test_report_written_with_run_summary(self):
+        with TemporaryDirectory() as tmp:
+            flow_path = Path(tmp) / "flow.json"
+            report_path = Path(tmp) / "report.json"
+            flow_path.write_text(json.dumps(GOOD))
+            code = main(["--report", str(report_path), str(flow_path)])
+            self.assertEqual(code, 0)
+            payload = json.loads(report_path.read_text())
+            self.assertEqual(payload["flow"], "demo")
+            self.assertEqual(payload["status"], "succeeded")
+
+    def test_unwritable_report_path_exit_2(self):
+        with TemporaryDirectory() as tmp:
+            flow_path = Path(tmp) / "flow.json"
+            flow_path.write_text(json.dumps(GOOD))
+            code = main(["--report", str(Path(tmp) / "no-such-dir" / "r.json"),
+                         str(flow_path)])
+            self.assertEqual(code, 2)
