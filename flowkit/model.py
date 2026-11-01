@@ -8,7 +8,10 @@ dependencies and cycles all fail fast with a clear message.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+from .envvar import check_syntax
 
 
 class FlowError(ValueError):
@@ -27,6 +30,9 @@ class Step:
         timeout_seconds: Per-attempt timeout; None means no limit.
         continue_on_error: When True, a failure here does not stop the
             rest of the flow; dependents still skip.
+        env: Extra environment variables for this step, as (name, value)
+            pairs. They override the flow-level ``env`` and the process
+            environment for this step's command only.
     """
 
     name: str
@@ -35,14 +41,21 @@ class Step:
     retries: int = 0
     timeout_seconds: float | None = None
     continue_on_error: bool = False
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
 class Flow:
-    """A validated workflow: a name plus its steps."""
+    """A validated workflow: a name plus its steps.
+
+    env holds flow-level environment variables as (name, value) pairs,
+    applied to every step below the process environment and below each
+    step's own ``env``.
+    """
 
     name: str
     steps: tuple[Step, ...]
+    env: tuple[tuple[str, str], ...] = ()
 
     def step(self, name: str) -> Step:
         for step in self.steps:
@@ -52,7 +65,25 @@ class Flow:
 
 
 _STEP_KEYS = {"name", "command", "depends_on", "retries", "timeout_seconds",
-              "continue_on_error"}
+              "continue_on_error", "env"}
+
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _validate_env(raw: object, where: str) -> tuple[tuple[str, str], ...]:
+    """Validate an ``env`` object into sorted-stable (name, value) pairs."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise FlowError(f"{where}: 'env' must be an object mapping names to values")
+    pairs = []
+    for key, value in raw.items():
+        if not isinstance(key, str) or not _NAME_RE.fullmatch(key):
+            raise FlowError(f"{where}: bad environment variable name {key!r}")
+        if not isinstance(value, str):
+            raise FlowError(f"{where}: environment value for {key!r} must be a string")
+        pairs.append((key, value))
+    return tuple(pairs)
 
 
 def load_flow(data: dict) -> Flow:
@@ -91,6 +122,10 @@ def load_flow(data: dict) -> Flow:
         command = raw.get("command")
         if not isinstance(command, str) or not command.strip():
             raise FlowError(f"{where} needs a non-empty string 'command'")
+        try:
+            check_syntax(command)
+        except ValueError as exc:
+            raise FlowError(f"{where}: {exc}") from exc
         depends_on = raw.get("depends_on", [])
         if not isinstance(depends_on, list) or not all(
                 isinstance(d, str) for d in depends_on):
@@ -110,6 +145,7 @@ def load_flow(data: dict) -> Flow:
             retries=retries,
             timeout_seconds=float(timeout) if timeout is not None else None,
             continue_on_error=bool(raw.get("continue_on_error", False)),
+            env=_validate_env(raw.get("env"), where),
         ))
 
     known = {step.name for step in steps}
@@ -120,7 +156,8 @@ def load_flow(data: dict) -> Flow:
             if dep == step.name:
                 raise FlowError(f"step {step.name!r} depends on itself")
 
-    flow = Flow(name=name, steps=tuple(steps))
+    flow_env = _validate_env(data.get("env"), "flow")
+    flow = Flow(name=name, steps=tuple(steps), env=flow_env)
     topo_order(flow)  # raises on cycles
     return flow
 
