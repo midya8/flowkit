@@ -64,5 +64,16 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
+class TestJobsFlag(unittest.TestCase):
+    def test_jobs_runs_flow(self):
+        code, out = run(["--jobs", "2", "--backoff", "0"], GOOD)
+        assert code == 0
+        assert "succeeded" in out
+
+    def test_jobs_zero_rejected(self):
+        code, _ = run(["--jobs", "0"], GOOD)
+        assert code == 2
+
+
 if __name__ == "__main__":
     unittest.main()
