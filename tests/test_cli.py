@@ -189,3 +189,44 @@ class TestOutputDirCli(unittest.TestCase):
             self.assertEqual(sorted(_os.listdir(outdir)), ["build.log", "test.log"])
             payload = _json.loads(out.stdout)
             self.assertTrue(payload["steps"][0]["output_file"].endswith("build.log"))
+
+
+class TestOnFailureHooksCli(unittest.TestCase):
+    HOOKED = {
+        "name": "demo",
+        "steps": [
+            {"name": "work", "command": "exit 1"},
+            {"name": "notify", "command": "echo paged", "trigger": "on_failure"},
+        ],
+    }
+
+    def test_text_marks_hook_line(self):
+        code, out = run(["--backoff", "0", "--show-output"], self.HOOKED)
+        self.assertEqual(code, 1)
+        self.assertIn("notify", out)
+        self.assertIn("[on failure]", out)
+        self.assertIn("paged", out)  # hook output visible with --show-output
+
+    def test_hook_skipped_on_success_text(self):
+        payload = {"name": "demo", "steps": [
+            {"name": "work", "command": "exit 0"},
+            {"name": "notify", "command": "echo paged", "trigger": "on_failure"},
+        ]}
+        code, out = run(["--backoff", "0"], payload)
+        self.assertEqual(code, 0)
+        self.assertIn("notify", out)
+        self.assertIn("skip", out)
+
+    def test_json_carries_trigger(self):
+        code, out = run(["--json", "--backoff", "0"], self.HOOKED)
+        data = json.loads(out)
+        notify = next(s for s in data["steps"] if s["name"] == "notify")
+        self.assertEqual(notify["trigger"], "on_failure")
+        self.assertEqual(notify["status"], "succeeded")
+
+    def test_dry_run_separates_hooks(self):
+        code, out = run(["--dry-run"], self.HOOKED)
+        self.assertEqual(code, 0)
+        self.assertIn("1 normal + 1 on-failure", out)
+        self.assertIn("on failure only:", out)
+        self.assertLess(out.index("work"), out.index("on failure only:"))

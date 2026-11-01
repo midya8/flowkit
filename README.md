@@ -19,8 +19,8 @@ commands interpolate both with `$VAR` / `${VAR}` / `${VAR:-default}`:
      "depends_on": ["extract"], "retries": 2, "timeout_seconds": 600},
     {"name": "load", "command": "python load.py ${DATA_DIR}",
      "depends_on": ["transform"], "retries": 2, "timeout_seconds": 600},
-    {"name": "notify", "command": "./notify.sh ${CHANNEL}", "depends_on": ["load"],
-     "continue_on_error": true, "env": {"CHANNEL": "#data-ops"}}
+    {"name": "notify", "command": "./notify.sh ${CHANNEL} 'nightly-etl FAILED'",
+     "trigger": "on_failure", "env": {"CHANNEL": "#data-ops"}}
   ]
 }
 ```
@@ -75,6 +75,15 @@ referencing an unset variable with no default.
   `DIR/<step>.log` (step names sanitized to safe file names) and the
   JSON report points at the file via `output_file` - memory keeps the
   tail, disk keeps everything.
+- **Failure hooks.** `"trigger": "on_failure"` holds a step out of the
+  normal pass and runs it only when some normal step failed - the
+  cleanup/notify hook. Hooks run sequentially in dependency order after
+  the failure; a failed hook skips its own hook dependents but never
+  stops the other hooks (fail-fast would only hide cleanup), and when
+  the flow succeeds hooks report as skipped. Hooks can depend only on
+  other hooks, normal steps cannot depend on hooks, and both are
+  rejected at load time. Dry-run lists hooks under their own
+  "on failure only" heading, and text/JSON results carry the trigger.
 - **Conditional steps and selection.** A step can carry a `when`
   condition - `{"when": {"env": "DEPLOY", "equals": "yes"}}` or
   `{"when": {"env": "DRY", "set": false}}` - evaluated against the
@@ -101,9 +110,12 @@ print(result.status)  # "succeeded" or "failed"
 python -m unittest discover -s tests -v
 ```
 
-38 tests cover flow validation (unknown keys, duplicates, dangling deps,
-cycles), topological ordering, retries, timeouts, skip/fail-fast
-semantics and the CLI exit codes.
+113 tests cover flow validation (unknown keys, duplicates, dangling deps,
+cycles, trigger/dependency mismatches), topological ordering, retries,
+timeouts, skip/fail-fast semantics, on-failure hook execution (fire on
+failure, skip on success, cascade and isolation between hooks,
+conditions and selection), layered environments, output capture, and
+the CLI exit codes.
 
 ## Layout
 

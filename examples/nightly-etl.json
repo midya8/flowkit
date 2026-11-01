@@ -29,14 +29,11 @@
     },
     {
       "name": "notify",
-      "command": "./notify.sh ${CHANNEL}",
-      "depends_on": [
-        "load"
-      ],
-      "continue_on_error": true,
+      "command": "./notify.sh ${CHANNEL} 'nightly-etl FAILED'",
       "env": {
         "CHANNEL": "#data-ops"
-      }
+      },
+      "trigger": "on_failure"
     }
   ]
 }
