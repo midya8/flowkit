@@ -32,6 +32,8 @@ python -m flowkit examples/nightly-etl.json --dry-run  # validate, print the pla
 python -m flowkit examples/nightly-etl.json --jobs 4   # independent steps in parallel
 python -m flowkit examples/nightly-etl.json --strict-env   # fail on unset $VARs
 python -m flowkit examples/nightly-etl.json --report run.json  # JSON run report
+python -m flowkit examples/nightly-etl.json --only extract,transform  # subset + deps
+python -m flowkit examples/nightly-etl.json --skip notify             # everything but
 ```
 
 Exit codes make it a scriptable gate: 0 when the flow succeeds (or a dry
@@ -68,6 +70,14 @@ referencing an unset variable with no default.
   tail. A failed step always prints its tail under its report line;
   `--show-output` prints successful steps' tails too, and the `--json`
   summary and `--report` file carry an `output` field per step.
+- **Conditional steps and selection.** A step can carry a `when`
+  condition - `{"when": {"env": "DEPLOY", "equals": "yes"}}` or
+  `{"when": {"env": "DRY", "set": false}}` - evaluated against the
+  merged environment at run time; a false condition skips the step and
+  its dependents without failing the flow. `--only a,b` runs the named
+  steps plus their transitive dependencies; `--skip c` runs everything
+  else (c's dependents skip too). `--dry-run` shows the selection and
+  annotates conditions, so the plan is reviewable before anything runs.
 
 ## Library
 

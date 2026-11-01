@@ -147,3 +147,40 @@ class TestCommandInterpolationSyntax(unittest.TestCase):
         f = load_flow({"name": "t", "steps": [
             {"name": "a", "command": "run $A ${B} ${C:-d}"}]})
         self.assertTrue(f.step("a").command.startswith("run"))
+
+
+class TestWhenValidation(unittest.TestCase):
+    def _load(self, when):
+        return load_flow({"name": "t", "steps": [
+            {"name": "a", "command": "x", "when": when}]})
+
+    def test_equals_and_set_forms_load(self):
+        self.assertEqual(self._load({"env": "GO", "equals": "yes"}).step("a").when,
+                         {"env": "GO", "equals": "yes"})
+        self.assertEqual(self._load({"env": "GO", "set": False}).step("a").when,
+                         {"env": "GO", "set": False})
+
+    def test_needs_exactly_one_of_equals_or_set(self):
+        with self.assertRaises(FlowError):
+            self._load({"env": "GO"})
+        with self.assertRaises(FlowError):
+            self._load({"env": "GO", "equals": "x", "set": True})
+
+    def test_env_name_and_types_validated(self):
+        with self.assertRaises(FlowError):
+            self._load({"env": "9BAD", "equals": "x"})
+        with self.assertRaises(FlowError):
+            self._load({"env": "GO", "equals": 1})
+        with self.assertRaises(FlowError):
+            self._load({"env": "GO", "set": "yes"})
+        with self.assertRaises(FlowError):
+            self._load({"env": "GO", "equals": "x", "bogus": 1})
+
+    def test_when_holds_semantics(self):
+        from flowkit.model import when_holds
+        self.assertTrue(when_holds(None, {}))
+        self.assertTrue(when_holds({"env": "A", "equals": "1"}, {"A": "1"}))
+        self.assertFalse(when_holds({"env": "A", "equals": "1"}, {"A": "2"}))
+        self.assertTrue(when_holds({"env": "A", "set": True}, {"A": "x"}))
+        self.assertFalse(when_holds({"env": "A", "set": True}, {"A": ""}))
+        self.assertTrue(when_holds({"env": "A", "set": False}, {}))

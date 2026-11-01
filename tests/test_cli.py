@@ -141,3 +141,32 @@ class TestReportFile(unittest.TestCase):
             code = main(["--report", str(Path(tmp) / "no-such-dir" / "r.json"),
                          str(flow_path)])
             self.assertEqual(code, 2)
+
+
+class TestStepSelectionCli(unittest.TestCase):
+    COND = {"name": "cond", "steps": [
+        {"name": "build", "command": "exit 0"},
+        {"name": "deploy", "command": "exit 0", "depends_on": ["build"],
+         "when": {"env": "FK_DEPLOY", "equals": "yes"}},
+    ]}
+
+    def test_only_runs_selection_and_deps(self):
+        code, out = run(["--only", "deploy"], self.COND)
+        self.assertEqual(code, 0)
+        self.assertIn("build", out)
+        self.assertIn("skip", out)  # deploy skipped: condition false in test env
+
+    def test_unknown_only_name_exit_2(self):
+        code, _ = run(["--only", "ghost"], GOOD)
+        self.assertEqual(code, 2)
+
+    def test_dry_run_marks_conditions_and_selection(self):
+        code, out = run(["--dry-run", "--only", "deploy"], self.COND)
+        self.assertEqual(code, 0)
+        self.assertIn("2 of 2 steps selected", out)
+        self.assertIn("when $FK_DEPLOY", out)
+
+    def test_skip_exits_0_and_skips(self):
+        code, out = run(["--skip", "test"], GOOD)
+        self.assertEqual(code, 0)
+        self.assertIn("1 succeeded, 0 failed, 1 skipped", out)
