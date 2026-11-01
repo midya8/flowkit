@@ -37,6 +37,11 @@ class Step:
             or {"env": "VAR", "set": true/false}. A step whose condition
             is false at run time is skipped (dependents skip too), and
             the skip does not fail the flow.
+        trigger: "always" (default) runs with the normal pass;
+            "on_failure" holds the step back and runs it only when some
+            normal step failed - the cleanup/notify hook. On-failure
+            steps can depend only on other on-failure steps, and normal
+            steps cannot depend on them.
     """
 
     name: str
@@ -47,6 +52,7 @@ class Step:
     continue_on_error: bool = False
     env: tuple[tuple[str, str], ...] = ()
     when: dict | None = None
+    trigger: str = "always"
 
 
 @dataclass(frozen=True)
@@ -70,7 +76,14 @@ class Flow:
 
 
 _STEP_KEYS = {"name", "command", "depends_on", "retries", "timeout_seconds",
-              "continue_on_error", "env", "when"}
+              "continue_on_error", "env", "when", "trigger"}
+
+
+def _validate_trigger(raw: object, where: str) -> str:
+    if raw not in ("always", "on_failure"):
+        raise FlowError(
+            f"{where}: 'trigger' must be \"always\" or \"on_failure\"")
+    return raw
 
 
 def _validate_when(raw: object, where: str) -> dict | None:
@@ -185,6 +198,7 @@ def load_flow(data: dict) -> Flow:
             continue_on_error=bool(raw.get("continue_on_error", False)),
             env=_validate_env(raw.get("env"), where),
             when=_validate_when(raw.get("when"), where),
+            trigger=_validate_trigger(raw.get("trigger", "always"), where),
         ))
 
     known = {step.name for step in steps}
@@ -194,6 +208,14 @@ def load_flow(data: dict) -> Flow:
                 raise FlowError(f"step {step.name!r} depends on unknown step {dep!r}")
             if dep == step.name:
                 raise FlowError(f"step {step.name!r} depends on itself")
+    by_trigger = {step.name: step.trigger for step in steps}
+    for step in steps:
+        for dep in step.depends_on:
+            if by_trigger[dep] != step.trigger:
+                raise FlowError(
+                    f"step {step.name!r} ({step.trigger}) depends on {dep!r} "
+                    f"({by_trigger[dep]}): on-failure hooks and normal steps "
+                    "cannot depend on each other")
 
     flow_env = _validate_env(data.get("env"), "flow")
     flow = Flow(name=name, steps=tuple(steps), env=flow_env)
