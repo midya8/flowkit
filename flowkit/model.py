@@ -37,10 +37,12 @@ class Step:
             or {"env": "VAR", "set": true/false}. A step whose condition
             is false at run time is skipped (dependents skip too), and
             the skip does not fail the flow.
-        trigger: "always" (default) runs with the normal pass;
-            "on_failure" holds the step back and runs it only when some
-            normal step failed - the cleanup/notify hook. On-failure
-            steps can depend only on other on-failure steps, and normal
+        trigger: "always" (default) runs with the normal pass. The
+            other values hold the step back for the end phase:
+            "on_failure" runs it only when some normal step failed,
+            "on_success" only when the normal pass fully succeeded, and
+            "finally" runs it either way - cleanup/notify hooks. End-phase
+            steps can depend only on other end-phase steps, and normal
             steps cannot depend on them.
     """
 
@@ -79,10 +81,13 @@ _STEP_KEYS = {"name", "command", "depends_on", "retries", "timeout_seconds",
               "continue_on_error", "env", "when", "trigger"}
 
 
+TRIGGERS = ("always", "on_failure", "on_success", "finally")
+
+
 def _validate_trigger(raw: object, where: str) -> str:
-    if raw not in ("always", "on_failure"):
+    if raw not in TRIGGERS:
         raise FlowError(
-            f"{where}: 'trigger' must be \"always\" or \"on_failure\"")
+            f"{where}: 'trigger' must be one of {', '.join(TRIGGERS)}")
     return raw
 
 
@@ -211,10 +216,10 @@ def load_flow(data: dict) -> Flow:
     by_trigger = {step.name: step.trigger for step in steps}
     for step in steps:
         for dep in step.depends_on:
-            if by_trigger[dep] != step.trigger:
+            if (step.trigger == "always") != (by_trigger[dep] == "always"):
                 raise FlowError(
                     f"step {step.name!r} ({step.trigger}) depends on {dep!r} "
-                    f"({by_trigger[dep]}): on-failure hooks and normal steps "
+                    f"({by_trigger[dep]}): end-phase steps and normal steps "
                     "cannot depend on each other")
 
     flow_env = _validate_env(data.get("env"), "flow")
