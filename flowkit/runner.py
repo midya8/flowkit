@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ class StepResult:
     duration_seconds: float
     exit_code: int | None
     last_output: str = ""
+    output_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,26 +77,46 @@ def missing_vars(flow: Flow, base: dict | None = None) -> dict:
     return out
 
 
+def output_path_for(output_dir: str, step_name: str) -> str:
+    """The log file for a step inside an output directory.
+
+    Step names come from JSON, so anything outside [A-Za-z0-9_.-] is
+    flattened to '-' - the file layout must be predictable and safe to
+    create.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", step_name).strip("-.") or "step"
+    return os.path.join(output_dir, f"{safe}.log")
+
+
 def _run_command(command: str, timeout: float | None,
-                 env: dict | None = None) -> tuple[int | None, str]:
+                 env: dict | None = None, log_path: str | None = None,
+                 attempt: int = 1) -> tuple[int | None, str]:
     """Run one attempt; return (exit_code, combined_output_tail).
 
     A timeout returns (None, ...) so the caller can treat it as a failed
-    attempt and still retry.
+    attempt and still retry. With ``log_path``, the attempt's FULL
+    combined output is appended to that file (with an attempt header);
+    the returned tail stays memory-bounded at 500 characters.
     """
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True,
             timeout=timeout, env=env,
         )
+        exit_code: int | None = proc.returncode
+        output = (proc.stdout + proc.stderr).strip()
     except subprocess.TimeoutExpired:
-        return None, f"timed out after {timeout:g}s"
-    output = (proc.stdout + proc.stderr).strip()
-    return proc.returncode, output[-500:]
+        exit_code = None
+        output = f"timed out after {timeout:g}s"
+    if log_path is not None:
+        with open(log_path, "a") as fh:
+            fh.write(f"--- attempt {attempt} (exit {exit_code}) ---\n")
+            fh.write(output + "\n")
+    return exit_code, output[-500:]
 
 
 def run_step(step: Step, backoff_seconds: float = 0.5,
-             env: dict | None = None) -> StepResult:
+             env: dict | None = None, log_path: str | None = None) -> StepResult:
     """Run one step with its retry policy; never raises for step failure.
 
     ``env`` is the already-merged environment for the step (see
@@ -108,7 +130,8 @@ def run_step(step: Step, backoff_seconds: float = 0.5,
     started = time.monotonic()
     for attempt in range(1 + step.retries):
         attempts += 1
-        exit_code, output = _run_command(command, step.timeout_seconds, env)
+        exit_code, output = _run_command(command, step.timeout_seconds, env,
+                                         log_path, attempt=attempt + 1)
         if exit_code == 0:
             break
         if attempt < step.retries and backoff_seconds > 0:
@@ -122,6 +145,7 @@ def run_step(step: Step, backoff_seconds: float = 0.5,
         duration_seconds=round(duration, 3),
         exit_code=exit_code,
         last_output=output,
+        output_file=log_path,
     )
 
 
@@ -155,7 +179,7 @@ def selected_steps(flow: Flow, only: set | None = None,
 
 def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
              env: dict | None = None, only: set | None = None,
-             skip: set | None = None) -> RunResult:
+             skip: set | None = None, output_dir: str | None = None) -> RunResult:
     """Run a flow, up to ``jobs`` independent steps at a time.
 
     A failed step marks its (transitive) dependents "skipped". Without
@@ -170,6 +194,8 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
     if jobs < 1:
         raise ValueError(f"jobs must be >= 1, got {jobs!r}")
     topo_order(flow)  # validate even for hand-built Flow objects
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
     selected = selected_steps(flow, only=only, skip=skip)
     by_name = {step.name: step for step in flow.steps}
     deps = {step.name: set(step.depends_on) for step in flow.steps}
@@ -204,10 +230,13 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
                     )
                     failed.add(name)  # skips cascade to dependents
                     continue
+                log_path = (output_path_for(output_dir, name)
+                            if output_dir is not None else None)
                 pending[pool.submit(
                     run_step, step, backoff_seconds,
                     step_env if step_env is not None
-                    else merged_env(flow, step, env))] = name
+                    else merged_env(flow, step, env),
+                    log_path)] = name
             if not pending:
                 if not progressed:
                     break  # unreachable on a validated DAG

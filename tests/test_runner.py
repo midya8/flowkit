@@ -242,3 +242,41 @@ class TestStepSelection(unittest.TestCase):
             selected_steps(self._flow(), only={"ghost"})
         with self.assertRaises(ValueError):
             selected_steps(self._flow(), skip={"ghost"})
+
+
+class TestOutputDir(unittest.TestCase):
+    def test_full_output_written_per_step(self):
+        import os
+        from tempfile import TemporaryDirectory
+        from flowkit.runner import run_flow
+        with TemporaryDirectory() as tmp:
+            f = flow([{"name": "loud", "command": "seq 1 300"}])
+            result = run_flow(f, backoff_seconds=0, output_dir=tmp)
+            log = open(os.path.join(tmp, "loud.log")).read()
+            self.assertIn("300", log)  # well past the 500-char memory tail
+            self.assertIn("--- attempt 1 (exit 0) ---", log)
+            self.assertTrue(result.results[0].output_file.endswith("loud.log"))
+            self.assertLess(len(result.results[0].last_output), 510)
+
+    def test_retries_append_attempt_sections(self):
+        import os
+        from tempfile import TemporaryDirectory
+        from flowkit.runner import run_flow
+        with TemporaryDirectory() as tmp:
+            f = flow([{"name": "flaky", "command": "echo try; exit 1", "retries": 1}])
+            run_flow(f, backoff_seconds=0, output_dir=tmp)
+            log = open(os.path.join(tmp, "flaky.log")).read()
+            self.assertEqual(log.count("--- attempt"), 2)
+
+    def test_step_names_sanitized_to_safe_files(self):
+        import os
+        from tempfile import TemporaryDirectory
+        from flowkit.runner import run_flow
+        with TemporaryDirectory() as tmp:
+            f = flow([{"name": "odd name!", "command": "exit 0"}])
+            run_flow(f, backoff_seconds=0, output_dir=tmp)
+            self.assertEqual(os.listdir(tmp), ["odd-name.log"])
+
+    def test_no_output_dir_no_files_and_none_field(self):
+        result = run_flow(flow([{"name": "a", "command": "exit 0"}]), backoff_seconds=0)
+        self.assertIsNone(result.results[0].output_file)

@@ -170,3 +170,22 @@ class TestStepSelectionCli(unittest.TestCase):
         code, out = run(["--skip", "test"], GOOD)
         self.assertEqual(code, 0)
         self.assertIn("1 succeeded, 0 failed, 1 skipped", out)
+
+
+class TestOutputDirCli(unittest.TestCase):
+    def test_output_dir_writes_logs_and_payload_paths(self):
+        import json as _json, os as _os, subprocess, sys
+        from pathlib import Path as _Path
+        from tempfile import TemporaryDirectory as _TD
+        with _TD() as tmp:
+            flow_path = _Path(tmp) / "f.json"
+            flow_path.write_text(_json.dumps(GOOD))
+            outdir = _Path(tmp) / "logs"
+            out = subprocess.run(
+                [sys.executable, "-m", "flowkit", "--backoff", "0",
+                 "--output-dir", str(outdir), "--json", str(flow_path)],
+                capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0)
+            self.assertEqual(sorted(_os.listdir(outdir)), ["build.log", "test.log"])
+            payload = _json.loads(out.stdout)
+            self.assertTrue(payload["steps"][0]["output_file"].endswith("build.log"))
