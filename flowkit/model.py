@@ -33,6 +33,10 @@ class Step:
         env: Extra environment variables for this step, as (name, value)
             pairs. They override the flow-level ``env`` and the process
             environment for this step's command only.
+        when: Optional run condition: {"env": "VAR", "equals": "value"}
+            or {"env": "VAR", "set": true/false}. A step whose condition
+            is false at run time is skipped (dependents skip too), and
+            the skip does not fail the flow.
     """
 
     name: str
@@ -42,6 +46,7 @@ class Step:
     timeout_seconds: float | None = None
     continue_on_error: bool = False
     env: tuple[tuple[str, str], ...] = ()
+    when: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +70,40 @@ class Flow:
 
 
 _STEP_KEYS = {"name", "command", "depends_on", "retries", "timeout_seconds",
-              "continue_on_error", "env"}
+              "continue_on_error", "env", "when"}
+
+
+def _validate_when(raw: object, where: str) -> dict | None:
+    """Validate a ``when`` condition: {"env": name, "equals": str} or {"env": name, "set": bool}."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise FlowError(f"{where}: 'when' must be an object")
+    unknown = set(raw) - {"env", "equals", "set"}
+    if unknown:
+        raise FlowError(f"{where}: 'when' has unknown keys: {sorted(unknown)}")
+    name = raw.get("env")
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise FlowError(f"{where}: 'when' needs an 'env' variable name")
+    has_equals = "equals" in raw
+    has_set = "set" in raw
+    if has_equals == has_set:
+        raise FlowError(f"{where}: 'when' needs exactly one of 'equals' or 'set'")
+    if has_equals and not isinstance(raw["equals"], str):
+        raise FlowError(f"{where}: 'when' 'equals' must be a string")
+    if has_set and not isinstance(raw["set"], bool):
+        raise FlowError(f"{where}: 'when' 'set' must be true or false")
+    return dict(raw)
+
+
+def when_holds(when: dict | None, env: dict) -> bool:
+    """Evaluate a step's run condition against the merged environment."""
+    if when is None:
+        return True
+    value = env.get(when["env"])
+    if "equals" in when:
+        return value == when["equals"]
+    return (value is not None and value != "") == when["set"]
 
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -146,6 +184,7 @@ def load_flow(data: dict) -> Flow:
             timeout_seconds=float(timeout) if timeout is not None else None,
             continue_on_error=bool(raw.get("continue_on_error", False)),
             env=_validate_env(raw.get("env"), where),
+            when=_validate_when(raw.get("when"), where),
         ))
 
     known = {step.name for step in steps}
