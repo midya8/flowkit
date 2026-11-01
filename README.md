@@ -34,6 +34,7 @@ python -m flowkit examples/nightly-etl.json --strict-env   # fail on unset $VARs
 python -m flowkit examples/nightly-etl.json --report run.json  # JSON run report
 python -m flowkit examples/nightly-etl.json --only extract,transform  # subset + deps
 python -m flowkit examples/nightly-etl.json --skip notify             # everything but
+python -m flowkit examples/nightly-etl.json --output-dir logs/        # full per-step logs
 ```
 
 Exit codes make it a scriptable gate: 0 when the flow succeeds (or a dry
@@ -69,7 +70,11 @@ referencing an unset variable with no default.
 - **Visible output.** Each step captures its combined stdout/stderr
   tail. A failed step always prints its tail under its report line;
   `--show-output` prints successful steps' tails too, and the `--json`
-  summary and `--report` file carry an `output` field per step.
+  summary and `--report` file carry an `output` field per step. For the
+  whole story, `--output-dir DIR` appends each attempt's FULL output to
+  `DIR/<step>.log` (step names sanitized to safe file names) and the
+  JSON report points at the file via `output_file` - memory keeps the
+  tail, disk keeps everything.
 - **Conditional steps and selection.** A step can carry a `when`
   condition - `{"when": {"env": "DEPLOY", "equals": "yes"}}` or
   `{"when": {"env": "DRY", "set": false}}` - evaluated against the
