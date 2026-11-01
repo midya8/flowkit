@@ -19,7 +19,12 @@ import sys
 
 from .model import FlowError, load_flow, topo_order
 from .report import render_text, result_payload
-from .runner import missing_vars, run_flow
+from .runner import missing_vars, run_flow, selected_steps
+
+
+def _name_set(value: str) -> set:
+    """Parse a comma-separated step-name list for --only/--skip."""
+    return {name.strip() for name in value.split(",") if name.strip()}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +46,11 @@ def main(argv: list[str] | None = None) -> int:
                              "unset variable with no default")
     parser.add_argument("--report", metavar="PATH",
                         help="also write the JSON run summary to PATH")
+    parser.add_argument("--only", metavar="NAMES",
+                        help="run only these comma-separated steps plus their "
+                             "transitive dependencies")
+    parser.add_argument("--skip", metavar="NAMES",
+                        help="skip these comma-separated steps (dependents skip too)")
     args = parser.parse_args(argv)
 
     try:
@@ -66,14 +76,30 @@ def main(argv: list[str] | None = None) -> int:
                 f"{step}: {', '.join(names)}" for step, names in unset.items())
             print(f"error: unset environment variables: {detail}", file=sys.stderr)
             return 2
+    only = _name_set(args.only) if args.only else None
+    skip = _name_set(args.skip) if args.skip else None
+    try:
+        selected = selected_steps(flow, only=only, skip=skip)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.dry_run:
-        print(f"Flow {flow.name!r}: {len(flow.steps)} steps, execution order:")
-        for step in topo_order(flow):
+        plan = [step for step in topo_order(flow) if step.name in selected]
+        print(f"Flow {flow.name!r}: {len(plan)} of {len(flow.steps)} steps selected, "
+              f"execution order:")
+        for step in plan:
             deps = f" (after {', '.join(step.depends_on)})" if step.depends_on else ""
-            print(f"  {step.name}{deps}")
+            condition = ""
+            if step.when is not None:
+                condition = (f" [when ${step.when['env']} == {step.when['equals']!r}]"
+                             if "equals" in step.when
+                             else f" [when ${step.when['env']} "
+                                  f"{'set' if step.when['set'] else 'unset'}]")
+            print(f"  {step.name}{deps}{condition}")
         return 0
 
-    result = run_flow(flow, backoff_seconds=args.backoff, jobs=args.jobs)
+    result = run_flow(flow, backoff_seconds=args.backoff, jobs=args.jobs,
+                      only=only, skip=skip)
     if args.report:
         try:
             with open(args.report, "w") as fh:
