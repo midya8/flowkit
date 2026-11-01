@@ -88,9 +88,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.dry_run:
         plan = [step for step in topo_order(flow) if step.name in selected]
-        print(f"Flow {flow.name!r}: {len(plan)} of {len(flow.steps)} steps selected, "
-              f"execution order:")
-        for step in plan:
+        normal_plan = [step for step in plan if step.trigger == "always"]
+        hook_plan = [step for step in plan if step.trigger == "on_failure"]
+        if hook_plan:
+            print(f"Flow {flow.name!r}: {len(normal_plan)} normal + {len(hook_plan)} "
+                  f"on-failure of {len(flow.steps)} steps selected, execution order:")
+        else:
+            print(f"Flow {flow.name!r}: {len(normal_plan)} of {len(flow.steps)} steps "
+                  f"selected, execution order:")
+        def _plan_line(step):
             deps = f" (after {', '.join(step.depends_on)})" if step.depends_on else ""
             condition = ""
             if step.when is not None:
@@ -98,7 +104,13 @@ def main(argv: list[str] | None = None) -> int:
                              if "equals" in step.when
                              else f" [when ${step.when['env']} "
                                   f"{'set' if step.when['set'] else 'unset'}]")
-            print(f"  {step.name}{deps}{condition}")
+            return f"  {step.name}{deps}{condition}"
+        for step in normal_plan:
+            print(_plan_line(step))
+        if hook_plan:
+            print("  on failure only:")
+            for step in hook_plan:
+                print("  " + _plan_line(step))
         return 0
 
     result = run_flow(flow, backoff_seconds=args.backoff, jobs=args.jobs,
