@@ -227,6 +227,39 @@ class TestOnFailureHooksCli(unittest.TestCase):
     def test_dry_run_separates_hooks(self):
         code, out = run(["--dry-run"], self.HOOKED)
         self.assertEqual(code, 0)
-        self.assertIn("1 normal + 1 on-failure", out)
-        self.assertIn("on failure only:", out)
-        self.assertLess(out.index("work"), out.index("on failure only:"))
+        self.assertIn("1 normal + 1 end-phase", out)
+        self.assertIn("end of run:", out)
+        self.assertIn("notify [on failure]", out)
+        self.assertLess(out.index("work"), out.index("end of run:"))
+
+
+class TestEndPhaseTriggersCli(unittest.TestCase):
+    FLOW = {"name": "demo", "steps": [
+        {"name": "work", "command": "exit 0"},
+        {"name": "notify-fail", "command": "echo bad", "trigger": "on_failure"},
+        {"name": "announce", "command": "echo green", "trigger": "on_success"},
+        {"name": "cleanup", "command": "echo done", "trigger": "finally"},
+    ]}
+
+    def test_text_marks_each_trigger(self):
+        code, out = run(["--backoff", "0", "--show-output"], self.FLOW)
+        self.assertEqual(code, 0)
+        self.assertIn("announce", out)
+        self.assertIn("[on success]", out)
+        self.assertIn("[at end]", out)
+        self.assertIn("green", out)
+
+    def test_json_triggers(self):
+        code, out = run(["--json", "--backoff", "0"], self.FLOW)
+        data = json.loads(out)
+        by_name = {s["name"]: s for s in data["steps"]}
+        self.assertEqual(by_name["announce"]["trigger"], "on_success")
+        self.assertEqual(by_name["announce"]["status"], "succeeded")
+        self.assertEqual(by_name["notify-fail"]["status"], "skipped")
+        self.assertEqual(by_name["cleanup"]["trigger"], "finally")
+
+    def test_dry_run_end_phase_section(self):
+        code, out = run(["--dry-run"], self.FLOW)
+        self.assertIn("3 end-phase", out)
+        self.assertIn("announce [on success]", out)
+        self.assertIn("cleanup [always]", out)
