@@ -9,10 +9,12 @@ declaration order, no matter which step finished first.
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import subprocess
 import time
 from dataclasses import dataclass
 
+from .envvar import expand
 from .model import Flow, Step, topo_order
 
 
@@ -48,7 +50,33 @@ class RunResult:
         return "failed" if any(r.status == "failed" for r in self.results) else "succeeded"
 
 
-def _run_command(command: str, timeout: float | None) -> tuple[int | None, str]:
+def merged_env(flow: Flow, step: Step, base: dict | None = None) -> dict:
+    """The environment a step runs with.
+
+    Starts from ``base`` (the process environment by default), applies
+    the flow-level ``env``, then the step's own ``env`` - most specific
+    wins. The step's command is expanded against this mapping, and it
+    is also passed to the subprocess itself.
+    """
+    env = dict(os.environ if base is None else base)
+    env.update(flow.env)
+    env.update(step.env)
+    return env
+
+
+def missing_vars(flow: Flow, base: dict | None = None) -> dict:
+    """{step_name: [unset variable names]} across the flow, for --strict-env."""
+    from .envvar import missing
+    out = {}
+    for step in flow.steps:
+        names = missing(step.command, merged_env(flow, step, base))
+        if names:
+            out[step.name] = names
+    return out
+
+
+def _run_command(command: str, timeout: float | None,
+                 env: dict | None = None) -> tuple[int | None, str]:
     """Run one attempt; return (exit_code, combined_output_tail).
 
     A timeout returns (None, ...) so the caller can treat it as a failed
@@ -57,7 +85,7 @@ def _run_command(command: str, timeout: float | None) -> tuple[int | None, str]:
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            timeout=timeout,
+            timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
         return None, f"timed out after {timeout:g}s"
@@ -65,15 +93,22 @@ def _run_command(command: str, timeout: float | None) -> tuple[int | None, str]:
     return proc.returncode, output[-500:]
 
 
-def run_step(step: Step, backoff_seconds: float = 0.5) -> StepResult:
-    """Run one step with its retry policy; never raises for step failure."""
+def run_step(step: Step, backoff_seconds: float = 0.5,
+             env: dict | None = None) -> StepResult:
+    """Run one step with its retry policy; never raises for step failure.
+
+    ``env`` is the already-merged environment for the step (see
+    merged_env); the command's $VAR references are expanded against it
+    and it is handed to the subprocess.
+    """
+    command = expand(step.command, env) if env is not None else step.command
     attempts = 0
     exit_code: int | None = None
     output = ""
     started = time.monotonic()
     for attempt in range(1 + step.retries):
         attempts += 1
-        exit_code, output = _run_command(step.command, step.timeout_seconds)
+        exit_code, output = _run_command(command, step.timeout_seconds, env)
         if exit_code == 0:
             break
         if attempt < step.retries and backoff_seconds > 0:
@@ -90,7 +125,8 @@ def run_step(step: Step, backoff_seconds: float = 0.5) -> StepResult:
     )
 
 
-def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1) -> RunResult:
+def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
+             env: dict | None = None) -> RunResult:
     """Run a flow, up to ``jobs`` independent steps at a time.
 
     A failed step marks its (transitive) dependents "skipped". Without
@@ -128,7 +164,10 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1) -> RunResu
                     )
                     failed.add(name)  # skips cascade to dependents
                     continue
-                pending[pool.submit(run_step, by_name[name], backoff_seconds)] = name
+                step = by_name[name]
+                pending[pool.submit(
+                    run_step, step, backoff_seconds,
+                    merged_env(flow, step, env))] = name
             if not pending:
                 if not progressed:
                     break  # unreachable on a validated DAG

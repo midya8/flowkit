@@ -101,3 +101,49 @@ class TestTopoOrder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEnvValidation(unittest.TestCase):
+    def test_step_env_parsed(self):
+        f = load_flow({"name": "t", "steps": [
+            {"name": "a", "command": "x", "env": {"DATA_DIR": "/d", "TAG": "v1"}},
+        ]})
+        self.assertEqual(dict(f.step("a").env), {"DATA_DIR": "/d", "TAG": "v1"})
+
+    def test_flow_env_parsed(self):
+        f = load_flow({"name": "t", "env": {"GLOBAL": "g"},
+                       "steps": [{"name": "a", "command": "x"}]})
+        self.assertEqual(dict(f.env), {"GLOBAL": "g"})
+        self.assertEqual(f.step("a").env, ())
+
+    def test_env_must_be_an_object(self):
+        with self.assertRaises(FlowError):
+            load_flow({"name": "t", "steps": [
+                {"name": "a", "command": "x", "env": ["A=1"]}]})
+
+    def test_env_name_must_be_a_valid_variable_name(self):
+        with self.assertRaises(FlowError):
+            load_flow({"name": "t", "steps": [
+                {"name": "a", "command": "x", "env": {"9BAD": "v"}}]})
+
+    def test_env_value_must_be_a_string(self):
+        with self.assertRaises(FlowError):
+            load_flow({"name": "t", "steps": [
+                {"name": "a", "command": "x", "env": {"N": 3}}]})
+
+    def test_env_is_a_known_step_key(self):
+        f = load_flow({"name": "t", "steps": [
+            {"name": "a", "command": "x", "env": {}}]})
+        self.assertEqual(f.step("a").env, ())
+
+
+class TestCommandInterpolationSyntax(unittest.TestCase):
+    def test_unclosed_brace_rejected_at_load(self):
+        with self.assertRaises(FlowError):
+            load_flow({"name": "t", "steps": [
+                {"name": "a", "command": "run ${OPEN"}]})
+
+    def test_valid_interpolation_loads(self):
+        f = load_flow({"name": "t", "steps": [
+            {"name": "a", "command": "run $A ${B} ${C:-d}"}]})
+        self.assertTrue(f.step("a").command.startswith("run"))
