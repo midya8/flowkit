@@ -1,13 +1,14 @@
-"""Sequential DAG execution with retries, timeouts and skip semantics.
+"""DAG execution with retries, timeouts, skip semantics and parallelism.
 
-v1 runs steps one at a time in topological order - boring and
-predictable, which is what you want from automation you paged yourself
-about. Each step is a shell command run with ``subprocess``; attempts
-are bounded by ``retries`` and ``timeout_seconds``.
+Steps run in topological order; with ``jobs > 1`` independent steps run
+concurrently (threads - the work is subprocesses, so the GIL is not the
+limit). Reporting stays deterministic: results are always in flow
+declaration order, no matter which step finished first.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import subprocess
 import time
 from dataclasses import dataclass
@@ -89,31 +90,61 @@ def run_step(step: Step, backoff_seconds: float = 0.5) -> StepResult:
     )
 
 
-def run_flow(flow: Flow, backoff_seconds: float = 0.5) -> RunResult:
-    """Run a flow in topological order.
+def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1) -> RunResult:
+    """Run a flow, up to ``jobs`` independent steps at a time.
 
     A failed step marks its (transitive) dependents "skipped". Without
-    ``continue_on_error`` the flow also stops scheduling new work: every
-    later step is skipped. Failed steps on a ``continue_on_error`` path
-    let independent steps keep running.
+    ``continue_on_error`` the flow also stops scheduling new work:
+    steps already running finish, everything later is skipped. Failed
+    steps on a ``continue_on_error`` path let independent steps keep
+    running. Raises ValueError for jobs < 1.
     """
+    if jobs < 1:
+        raise ValueError(f"jobs must be >= 1, got {jobs!r}")
+    topo_order(flow)  # validate even for hand-built Flow objects
+    by_name = {step.name: step for step in flow.steps}
+    deps = {step.name: set(step.depends_on) for step in flow.steps}
     results: dict[str, StepResult] = {}
+    succeeded: set[str] = set()
     failed: set[str] = set()
     stopped = False
-    for step in topo_order(flow):
-        if stopped or any(dep in failed for dep in step.depends_on):
-            results[step.name] = StepResult(
-                name=step.name, status="skipped", attempts=0,
-                duration_seconds=0.0, exit_code=None,
-            )
-            failed.add(step.name)  # skips cascade to dependents
-            continue
-        result = run_step(step, backoff_seconds=backoff_seconds)
-        results[step.name] = result
-        if result.status == "failed":
-            failed.add(step.name)
-            if not step.continue_on_error:
-                stopped = True
+    remaining = [step.name for step in flow.steps]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        pending: dict[concurrent.futures.Future, str] = {}
+        while remaining or pending:
+            progressed = False
+            for name in list(remaining):
+                if not deps[name] <= (succeeded | failed):
+                    continue  # dependencies still running
+                if len(pending) >= jobs:
+                    break  # a slot frees up on the next completion
+                remaining.remove(name)
+                progressed = True
+                if stopped or deps[name] & failed:
+                    results[name] = StepResult(
+                        name=name, status="skipped", attempts=0,
+                        duration_seconds=0.0, exit_code=None,
+                    )
+                    failed.add(name)  # skips cascade to dependents
+                    continue
+                pending[pool.submit(run_step, by_name[name], backoff_seconds)] = name
+            if not pending:
+                if not progressed:
+                    break  # unreachable on a validated DAG
+                continue
+            done, _ = concurrent.futures.wait(
+                pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                name = pending.pop(future)
+                result = future.result()
+                results[name] = result
+                if result.status == "succeeded":
+                    succeeded.add(name)
+                else:
+                    failed.add(name)
+                    if not by_name[name].continue_on_error:
+                        stopped = True
     return RunResult(
         flow_name=flow.name,
         results=tuple(results[s.name] for s in flow.steps),
