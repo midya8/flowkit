@@ -137,3 +137,54 @@ class TestRunFlowParallel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStepEnvironment(unittest.TestCase):
+    def test_step_env_reaches_the_command(self):
+        f = flow([{"name": "a", "command": "test \"$FK_MARK\" = green",
+                   "env": {"FK_MARK": "green"}}])
+        result = run_flow(f, backoff_seconds=0, env={})
+        self.assertEqual(result.results[0].status, "succeeded")
+
+    def test_flow_env_applies_to_every_step(self):
+        f = load_flow({"name": "t", "env": {"FK_MARK": "from-flow"},
+                       "steps": [{"name": "a", "command": "test \"$FK_MARK\" = from-flow"}]})
+        result = run_flow(f, backoff_seconds=0, env={})
+        self.assertEqual(result.results[0].status, "succeeded")
+
+    def test_step_env_overrides_flow_env(self):
+        f = load_flow({"name": "t", "env": {"FK_MARK": "flow"},
+                       "steps": [{"name": "a", "command": "test \"$FK_MARK\" = step",
+                                  "env": {"FK_MARK": "step"}}]})
+        result = run_flow(f, backoff_seconds=0, env={})
+        self.assertEqual(result.results[0].status, "succeeded")
+
+    def test_base_env_visible_when_not_overridden(self):
+        f = flow([{"name": "a", "command": "test \"$FK_BASE\" = yes"}])
+        result = run_flow(f, backoff_seconds=0, env={"FK_BASE": "yes"})
+        self.assertEqual(result.results[0].status, "succeeded")
+
+    def test_command_expansion_uses_merged_env(self):
+        f = load_flow({"name": "t", "env": {"FK_WORD": "expanded-word"},
+                       "steps": [{"name": "a", "command": "echo ${FK_WORD}"}]})
+        result = run_flow(f, backoff_seconds=0, env={})
+        self.assertEqual(result.results[0].status, "succeeded")
+        self.assertIn("expanded-word", result.results[0].last_output)
+
+    def test_default_used_when_unset(self):
+        f = flow([{"name": "a", "command": "echo ${FK_UNSET:-the-default}"}])
+        result = run_flow(f, backoff_seconds=0, env={})
+        self.assertIn("the-default", result.results[0].last_output)
+
+
+class TestMissingVars(unittest.TestCase):
+    def test_unset_reference_reported(self):
+        from flowkit.runner import missing_vars
+        f = flow([{"name": "a", "command": "deploy $FK_TARGET"}])
+        self.assertEqual(missing_vars(f, base={}), {"a": ["FK_TARGET"]})
+
+    def test_defaults_and_env_satisfy_references(self):
+        from flowkit.runner import missing_vars
+        f = load_flow({"name": "t", "env": {"FK_A": "1"},
+                       "steps": [{"name": "a", "command": "run $FK_A ${FK_B:-x}"}]})
+        self.assertEqual(missing_vars(f, base={}), {})
