@@ -47,7 +47,7 @@ def result_payload(result: RunResult) -> dict:
         "steps": [
             {"name": r.name, "status": r.status, "attempts": r.attempts,
              "duration_seconds": r.duration_seconds, "exit_code": r.exit_code,
-             "output": r.last_output}
+             "output": r.last_output, "output_file": r.output_file}
             for r in result.results
         ],
     }
