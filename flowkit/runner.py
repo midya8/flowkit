@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 
 from .envvar import expand
-from .model import Flow, Step, topo_order
+from .model import Flow, Step, topo_order, when_holds
 
 
 @dataclass(frozen=True)
@@ -125,19 +125,52 @@ def run_step(step: Step, backoff_seconds: float = 0.5,
     )
 
 
+def selected_steps(flow: Flow, only: set | None = None,
+                   skip: set | None = None) -> set:
+    """The steps a run should schedule.
+
+    ``only`` selects those steps plus their transitive dependencies;
+    ``skip`` removes steps (their dependents still skip through the
+    normal cascade). Unknown names raise ValueError naming them.
+    """
+    known = {step.name for step in flow.steps}
+    for label, names in (("--only", only), ("--skip", skip)):
+        if names:
+            unknown = names - known
+            if unknown:
+                raise ValueError(f"{label} names unknown steps: {sorted(unknown)}")
+    if only is not None:
+        selected: set = set()
+        stack = list(only)
+        while stack:
+            name = stack.pop()
+            if name in selected:
+                continue
+            selected.add(name)
+            stack.extend(flow.step(name).depends_on)
+    else:
+        selected = set(known)
+    return selected - (skip or set())
+
+
 def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
-             env: dict | None = None) -> RunResult:
+             env: dict | None = None, only: set | None = None,
+             skip: set | None = None) -> RunResult:
     """Run a flow, up to ``jobs`` independent steps at a time.
 
     A failed step marks its (transitive) dependents "skipped". Without
     ``continue_on_error`` the flow also stops scheduling new work:
     steps already running finish, everything later is skipped. Failed
     steps on a ``continue_on_error`` path let independent steps keep
-    running. Raises ValueError for jobs < 1.
+    running. A step whose ``when`` condition is false, or that is
+    outside the --only/--skip selection, is skipped the same way -
+    dependents skip, the flow does not fail. Raises ValueError for
+    jobs < 1 or selection names that are not steps in the flow.
     """
     if jobs < 1:
         raise ValueError(f"jobs must be >= 1, got {jobs!r}")
     topo_order(flow)  # validate even for hand-built Flow objects
+    selected = selected_steps(flow, only=only, skip=skip)
     by_name = {step.name: step for step in flow.steps}
     deps = {step.name: set(step.depends_on) for step in flow.steps}
     results: dict[str, StepResult] = {}
@@ -157,17 +190,24 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
                     break  # a slot frees up on the next completion
                 remaining.remove(name)
                 progressed = True
-                if stopped or deps[name] & failed:
+                step = by_name[name]
+                step_env = None
+                condition_ok = True
+                if name in selected and step.when is not None:
+                    step_env = merged_env(flow, step, env)
+                    condition_ok = when_holds(step.when, step_env)
+                if stopped or deps[name] & failed or name not in selected \
+                        or not condition_ok:
                     results[name] = StepResult(
                         name=name, status="skipped", attempts=0,
                         duration_seconds=0.0, exit_code=None,
                     )
                     failed.add(name)  # skips cascade to dependents
                     continue
-                step = by_name[name]
                 pending[pool.submit(
                     run_step, step, backoff_seconds,
-                    merged_env(flow, step, env))] = name
+                    step_env if step_env is not None
+                    else merged_env(flow, step, env))] = name
             if not pending:
                 if not progressed:
                     break  # unreachable on a validated DAG
