@@ -1,12 +1,42 @@
 {
   "name": "nightly-etl",
+  "env": {
+    "DATA_DIR": "/data/nightly"
+  },
   "steps": [
-    {"name": "extract", "command": "echo extracting orders", "timeout_seconds": 30},
-    {"name": "transform", "command": "echo transforming rows", "depends_on": ["extract"],
-     "retries": 2, "timeout_seconds": 60},
-    {"name": "load", "command": "echo loading warehouse", "depends_on": ["transform"],
-     "retries": 2, "timeout_seconds": 60},
-    {"name": "notify", "command": "echo paged the data channel", "depends_on": ["load"],
-     "continue_on_error": true}
+    {
+      "name": "extract",
+      "command": "python extract.py --out ${DATA_DIR}",
+      "timeout_seconds": 300
+    },
+    {
+      "name": "transform",
+      "command": "python transform.py --in ${DATA_DIR}",
+      "depends_on": [
+        "extract"
+      ],
+      "retries": 2,
+      "timeout_seconds": 600
+    },
+    {
+      "name": "load",
+      "command": "python load.py ${DATA_DIR}",
+      "depends_on": [
+        "transform"
+      ],
+      "retries": 2,
+      "timeout_seconds": 600
+    },
+    {
+      "name": "notify",
+      "command": "./notify.sh ${CHANNEL}",
+      "depends_on": [
+        "load"
+      ],
+      "continue_on_error": true,
+      "env": {
+        "CHANNEL": "#data-ops"
+      }
+    }
   ]
 }
