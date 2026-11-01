@@ -34,6 +34,19 @@
         "CHANNEL": "#data-ops"
       },
       "trigger": "on_failure"
+    },
+    {
+      "name": "announce",
+      "command": "./notify.sh ${CHANNEL} 'nightly-etl OK'",
+      "trigger": "on_success",
+      "env": {
+        "CHANNEL": "#data-ops"
+      }
+    },
+    {
+      "name": "cleanup",
+      "command": "rm -rf ${DATA_DIR}/scratch",
+      "trigger": "finally"
     }
   ]
 }
