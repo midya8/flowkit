@@ -51,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
                              "transitive dependencies")
     parser.add_argument("--skip", metavar="NAMES",
                         help="skip these comma-separated steps (dependents skip too)")
+    parser.add_argument("--output-dir", metavar="DIR",
+                        help="write each step's FULL output to DIR/<step>.log "
+                             "(appended per attempt; reports keep the tail)")
     args = parser.parse_args(argv)
 
     try:
@@ -99,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     result = run_flow(flow, backoff_seconds=args.backoff, jobs=args.jobs,
-                      only=only, skip=skip)
+                      only=only, skip=skip, output_dir=args.output_dir)
     if args.report:
         try:
             with open(args.report, "w") as fh:
