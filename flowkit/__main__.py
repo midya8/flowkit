@@ -89,10 +89,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         plan = [step for step in topo_order(flow) if step.name in selected]
         normal_plan = [step for step in plan if step.trigger == "always"]
-        hook_plan = [step for step in plan if step.trigger == "on_failure"]
+        hook_plan = [step for step in plan if step.trigger != "always"]
         if hook_plan:
             print(f"Flow {flow.name!r}: {len(normal_plan)} normal + {len(hook_plan)} "
-                  f"on-failure of {len(flow.steps)} steps selected, execution order:")
+                  f"end-phase of {len(flow.steps)} steps selected, execution order:")
         else:
             print(f"Flow {flow.name!r}: {len(normal_plan)} of {len(flow.steps)} steps "
                   f"selected, execution order:")
@@ -108,9 +108,11 @@ def main(argv: list[str] | None = None) -> int:
         for step in normal_plan:
             print(_plan_line(step))
         if hook_plan:
-            print("  on failure only:")
+            print("  end of run:")
+            gate = {"on_failure": " [on failure]", "on_success": " [on success]",
+                    "finally": " [always]"}
             for step in hook_plan:
-                print("  " + _plan_line(step))
+                print("  " + _plan_line(step) + gate[step.trigger])
         return 0
 
     result = run_flow(flow, backoff_seconds=args.backoff, jobs=args.jobs,

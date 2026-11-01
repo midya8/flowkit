@@ -193,14 +193,16 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
     outside the --only/--skip selection, is skipped the same way -
     dependents skip, the flow does not fail.
 
-    Steps declared ``trigger: on_failure`` are held out of the normal
-    pass. When any normal step failed, the hooks then run one at a time
-    in dependency order - cleanup and notification work that should only
-    happen on a failed run. A failed hook skips its own hook dependents
-    but never stops the other hooks (the flow is already failing, so
-    fail-fast would only hide cleanup). When the normal pass succeeds,
-    hooks report as skipped. Raises ValueError for jobs < 1 or
-    selection names that are not steps in the flow.
+    Steps declared with an end-phase trigger are held out of the
+    normal pass and then run one at a time in dependency order:
+    ``on_failure`` hooks only when some normal step failed,
+    ``on_success`` hooks only when the normal pass fully succeeded, and
+    ``finally`` hooks either way - cleanup and notification work.
+    A failed or gated-off hook skips its own hook dependents but never
+    stops the other hooks (fail-fast would only hide cleanup). Hooks
+    whose gate does not match the outcome report as skipped. Raises
+    ValueError for jobs < 1 or selection names that are not steps in
+    the flow.
     """
     if jobs < 1:
         raise ValueError(f"jobs must be >= 1, got {jobs!r}")
@@ -210,7 +212,7 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
     selected = selected_steps(flow, only=only, skip=skip)
     by_name = {step.name: step for step in flow.steps}
     normal_steps = [step for step in flow.steps if step.trigger == "always"]
-    hook_steps = [step for step in flow.steps if step.trigger == "on_failure"]
+    hook_steps = [step for step in flow.steps if step.trigger != "always"]
     deps = {step.name: set(step.depends_on) for step in normal_steps}
     results: dict[str, StepResult] = {}
     succeeded: set[str] = set()
@@ -266,8 +268,8 @@ def run_flow(flow: Flow, backoff_seconds: float = 0.5, jobs: int = 1,
                     failed.add(name)
                     if not by_name[name].continue_on_error:
                         stopped = True
-    _run_hooks(flow, hook_steps, selected, results, failed,
-               backoff_seconds, env, output_dir)
+    _run_hooks(flow, hook_steps, selected, results, backoff_seconds,
+               env, output_dir)
     return RunResult(
         flow_name=flow.name,
         results=tuple(results[s.name] for s in flow.steps),
@@ -281,15 +283,24 @@ def _skipped_result(step: Step) -> StepResult:
     )
 
 
-def _run_hooks(flow: Flow, hook_steps: list, selected: set,
-               results: dict, normal_failed: set,
-               backoff_seconds: float, env: dict | None,
-               output_dir: str | None) -> None:
-    """Run the on-failure hooks after the normal pass, in place.
+def _hook_gate(trigger: str, normal_failed_any: bool) -> bool:
+    """Whether an end-phase trigger fires for this run's outcome."""
+    if trigger == "on_failure":
+        return normal_failed_any
+    if trigger == "on_success":
+        return not normal_failed_any
+    return True  # finally
 
-    Hooks run sequentially in dependency order when any normal step
-    failed; otherwise every hook reports skipped. A failed or skipped
-    hook cascades to its hook dependents but never stops other hooks.
+
+def _run_hooks(flow: Flow, hook_steps: list, selected: set,
+               results: dict, backoff_seconds: float, env: dict | None,
+               output_dir: str | None) -> None:
+    """Run the end-phase hooks after the normal pass, in place.
+
+    Hooks run sequentially in dependency order. Each fires only when its
+    trigger matches the normal pass's outcome; a gated-off, unselected,
+    condition-false or failed hook cascades to its hook dependents but
+    never stops the other hooks.
     """
     if not hook_steps:
         return
@@ -298,17 +309,15 @@ def _run_hooks(flow: Flow, hook_steps: list, selected: set,
         results[step.name].status == "failed" for step in flow.steps
         if step.trigger == "always"
     )
-    if not normal_failed_any:
-        for step in hook_steps:
-            results[step.name] = _skipped_result(step)
-        return
     hook_failed: set[str] = set()
     order = [step.name for step in topo_order(flow) if step.name in hook_names]
     for name in order:
         step = next(s for s in hook_steps if s.name == name)
         step_env = merged_env(flow, step, env)
         condition_ok = when_holds(step.when, step_env) if step.when is not None else True
-        if (name not in selected or hook_failed & set(step.depends_on)
+        if (not _hook_gate(step.trigger, normal_failed_any)
+                or name not in selected
+                or hook_failed & set(step.depends_on)
                 or not condition_ok):
             results[name] = _skipped_result(step)
             hook_failed.add(name)  # skips cascade to hook dependents

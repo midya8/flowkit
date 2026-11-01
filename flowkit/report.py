@@ -27,7 +27,8 @@ def render_text(result: RunResult, show_output: bool = False) -> str:
         elif r.status == "failed":
             reason = "timeout" if r.exit_code is None else f"exit {r.exit_code}"
             detail = f"{reason} after {r.attempts} attempt{'s' if r.attempts != 1 else ''}"
-        hook = " [on failure]" if r.trigger == "on_failure" else ""
+        hook = {"on_failure": " [on failure]", "on_success": " [on success]",
+                "finally": " [at end]"}.get(r.trigger, "")
         lines.append(f"  {r.name:24s} {_MARK[r.status]:6s} {detail}{hook}".rstrip())
         if r.last_output and (r.status == "failed" or (show_output and r.status == "succeeded")):
             lines.extend(_output_lines(r.last_output))
