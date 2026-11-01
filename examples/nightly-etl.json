@@ -1,0 +1,12 @@
+{
+  "name": "nightly-etl",
+  "steps": [
+    {"name": "extract", "command": "echo extracting orders", "timeout_seconds": 30},
+    {"name": "transform", "command": "echo transforming rows", "depends_on": ["extract"],
+     "retries": 2, "timeout_seconds": 60},
+    {"name": "load", "command": "echo loading warehouse", "depends_on": ["transform"],
+     "retries": 2, "timeout_seconds": 60},
+    {"name": "notify", "command": "echo paged the data channel", "depends_on": ["load"],
+     "continue_on_error": true}
+  ]
+}
