@@ -27,7 +27,8 @@ def render_text(result: RunResult, show_output: bool = False) -> str:
         elif r.status == "failed":
             reason = "timeout" if r.exit_code is None else f"exit {r.exit_code}"
             detail = f"{reason} after {r.attempts} attempt{'s' if r.attempts != 1 else ''}"
-        lines.append(f"  {r.name:24s} {_MARK[r.status]:6s} {detail}".rstrip())
+        hook = " [on failure]" if r.trigger == "on_failure" else ""
+        lines.append(f"  {r.name:24s} {_MARK[r.status]:6s} {detail}{hook}".rstrip())
         if r.last_output and (r.status == "failed" or (show_output and r.status == "succeeded")):
             lines.extend(_output_lines(r.last_output))
     counts = {s: sum(1 for r in result.results if r.status == s) for s in _MARK}
@@ -47,7 +48,8 @@ def result_payload(result: RunResult) -> dict:
         "steps": [
             {"name": r.name, "status": r.status, "attempts": r.attempts,
              "duration_seconds": r.duration_seconds, "exit_code": r.exit_code,
-             "output": r.last_output, "output_file": r.output_file}
+             "output": r.last_output, "output_file": r.output_file,
+             "trigger": r.trigger}
             for r in result.results
         ],
     }
