@@ -2,7 +2,21 @@
 
 Dependency-free workflow runner: JSON-defined DAGs of shell commands with
 retries, timeouts and fail-fast or continue-on-error semantics. Standard
-library only - if Python is installed, flowkit runs.
+library only, with no runtime dependencies.
+
+## Plan before running
+
+`--dry-run` validates and lists the selected steps without executing commands.
+It lists step names and dependencies, not expanded shell commands.
+`--only` includes the named steps and their dependencies; `--skip` excludes a
+step and causes its dependents to skip. End-phase hooks run after normal steps,
+according to the normal phase's outcome.
+
+Flow commands execute in a shell with the caller's permissions. Validation
+checks the flow structure, not command safety. Interpolated environment values
+are not shell-escaped. Review commands and values before execution.
+
+## Define a flow
 
 A flow names its steps and wires them by `depends_on`. Flow-level `env`
 applies to every step; a step's own `env` overrides it for that step, and
@@ -29,10 +43,16 @@ commands interpolate both with `$VAR` / `${VAR}` / `${VAR:-default}`:
 }
 ```
 
+The ETL file is a template: `extract.py`, `transform.py`, `load.py` and
+`notify.sh` are not included. Its cleanup command deletes the configured scratch
+directory. Review the JSON and use a dry-run to inspect the step order; supply
+your own scripts and paths before running the full example.
+
 ```bash
-python -m flowkit examples/nightly-etl.json            # run it
+python -m flowkit examples/nightly-etl.json --dry-run  # validate, list the steps
+# After supplying the scripts and reviewing commands and paths:
+python -m flowkit examples/nightly-etl.json            # run the adapted flow
 python -m flowkit examples/nightly-etl.json --json     # machine-readable summary
-python -m flowkit examples/nightly-etl.json --dry-run  # validate, print the plan
 python -m flowkit examples/nightly-etl.json --jobs 4   # independent steps in parallel
 python -m flowkit examples/nightly-etl.json --strict-env   # fail on unset $VARs
 python -m flowkit examples/nightly-etl.json --report run.json  # JSON run report
@@ -117,7 +137,7 @@ print(result.status)  # "succeeded" or "failed"
 python -m unittest discover -s tests -v
 ```
 
-123 tests cover flow validation (unknown keys, duplicates, dangling deps,
+The 123-test suite covers flow validation (unknown keys, duplicates, dangling deps,
 cycles, trigger/dependency mismatches), topological ordering, retries,
 timeouts, skip/fail-fast semantics, end-phase hook execution
 (on_failure/on_success/finally gating, cascade and isolation between
