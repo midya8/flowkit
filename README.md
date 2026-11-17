@@ -1,93 +1,45 @@
 # flowkit
 
-I wanted a way to run a handful of shell commands in the right order, with retries and a clear answer at the end. flowkit is that: you describe a flow as a JSON file, a DAG of steps, and it runs them. It only uses the standard library, so if Python is installed, flowkit runs.
+A tiny workflow runner. You write a JSON file listing shell commands and what each depends on, and flowkit runs them in order with retries, timeouts and a clear pass/fail at the end. Standard library only.
 
-One thing to know before you run anything: commands execute in a shell with your permissions, and flowkit checks the shape of the flow, not whether the commands are safe. Values interpolated into a command aren't shell-escaped, so read the commands and the values before you run them. `--dry-run` validates and lists the selected steps without executing anything — it lists step names and dependencies, not the expanded shell commands.
-
-A flow is just named steps wired together with `depends_on`. You can set `env` once at the flow level and it applies to every step; a step's own `env` overrides it for that step. Commands interpolate `$VAR`, `${VAR}`, and `${VAR:-default}` from the merged environment. Here's a nightly ETL as an example:
+I wanted something between a Makefile and Airflow for small nightly jobs, without installing anything.
 
 ```json
 {
   "name": "nightly-etl",
   "env": {"DATA_DIR": "/data/nightly"},
   "steps": [
-    {"name": "extract", "command": "python extract.py --out ${DATA_DIR}",
-     "timeout_seconds": 300},
+    {"name": "extract", "command": "python extract.py --out ${DATA_DIR}", "timeout_seconds": 300},
     {"name": "transform", "command": "python transform.py --in ${DATA_DIR}",
-     "depends_on": ["extract"], "retries": 2, "timeout_seconds": 600},
-    {"name": "load", "command": "python load.py ${DATA_DIR}",
-     "depends_on": ["transform"], "retries": 2, "timeout_seconds": 600},
-    {"name": "notify", "command": "./notify.sh ${CHANNEL} 'nightly-etl FAILED'",
-     "trigger": "on_failure", "env": {"CHANNEL": "#data-ops"}},
-    {"name": "announce", "command": "./notify.sh ${CHANNEL} 'nightly-etl OK'",
-     "trigger": "on_success", "env": {"CHANNEL": "#data-ops"}},
-    {"name": "cleanup", "command": "rm -rf ${DATA_DIR}/scratch",
-     "trigger": "finally"}
+     "depends_on": ["extract"], "retries": 2},
+    {"name": "load", "command": "python load.py ${DATA_DIR}", "depends_on": ["transform"]},
+    {"name": "notify", "command": "./notify.sh 'nightly-etl FAILED'", "trigger": "on_failure"},
+    {"name": "cleanup", "command": "rm -rf ${DATA_DIR}/scratch", "trigger": "finally"}
   ]
 }
 ```
 
-That ETL file is a template: `extract.py`, `transform.py`, `load.py`, and `notify.sh` aren't included, and the cleanup step deletes the scratch directory you configure. Run `--dry-run` first to check the step order, then put in your own scripts and paths before running the full example.
+(The full version is in `examples/nightly-etl.json`. The scripts it calls aren't included, so dry-run it first and swap in your own.)
 
 ```bash
-python -m flowkit examples/nightly-etl.json            # run it
-python -m flowkit examples/nightly-etl.json --json     # machine-readable summary
-python -m flowkit examples/nightly-etl.json --dry-run  # validate, print the plan
-python -m flowkit examples/nightly-etl.json --jobs 4   # independent steps in parallel
-python -m flowkit examples/nightly-etl.json --strict-env   # fail on unset $VARs
-python -m flowkit examples/nightly-etl.json --report run.json  # JSON run report
-python -m flowkit examples/nightly-etl.json --only extract,transform  # subset + deps
-python -m flowkit examples/nightly-etl.json --skip notify             # everything but
-python -m flowkit examples/nightly-etl.json --output-dir logs/        # full per-step logs
+python -m flowkit examples/nightly-etl.json --dry-run   # check the order without running
+python -m flowkit examples/nightly-etl.json
+python -m flowkit examples/nightly-etl.json --jobs 4    # run independent steps in parallel
+python -m flowkit flow.json --only extract,transform    # a subset plus its deps
+python -m flowkit flow.json --report run.json --output-dir logs/
 ```
 
-The exit code is meant to be usable from a script: 0 when the flow succeeds (or a dry run validates), 1 when a step failed, 2 when the flow file itself is unreadable or invalid — or when `--strict-env` finds a command referencing an unset variable with no default.
+Exit code is 0 on success, 1 if a step failed, 2 if the flow file is broken (or `--strict-env` finds an unset variable).
 
-## How it behaves
+How it behaves, briefly:
 
-**It checks the flow before running anything.** Unknown keys, missing fields, duplicate step names, dangling dependencies, and cycles are all rejected up front, with a message naming the problem. Nothing runs until the flow is valid.
+- The whole file is validated first. Cycles, missing dependencies, duplicate names and unknown keys are caught before anything runs.
+- Steps run in dependency order, ties broken by the order you wrote them. Results always print in that order even with `--jobs`.
+- `retries: 2` means up to three attempts with doubling backoff. A timeout counts as a failed attempt.
+- By default the first failure stops new work and dependents are skipped. `continue_on_error` on a step lets the rest carry on.
+- `on_failure`, `on_success` and `finally` steps run after the main pass, which is where cleanup and notifications go.
+- `$VAR`, `${VAR}` and `${VAR:-default}` are expanded from the process env, then the flow env, then the step env.
 
-**Steps run in a fixed order.** Topological order, and among steps that are ready, the one declared first goes first. `--jobs N` runs up to N independent steps concurrently, but results always report in declaration order, no matter which step finished first. Fail-fast means steps already running finish while nothing new is scheduled.
+Commands run in a real shell with your permissions and values aren't escaped, so only run flows you've read.
 
-**Retries and timeouts.** `retries: 2` means up to three attempts, and the backoff doubles each attempt from `--backoff` (default 0.5s). `timeout_seconds` bounds each attempt; a timeout counts as a failed attempt and still consumes retries.
-
-**When a step fails, its dependents skip.** The default is fail-fast, so independent later work is skipped too. Mark a step `continue_on_error` and the rest of the flow proceeds, while that step's own dependents still skip.
-
-**Environment, layered.** Every step runs with the process environment, plus the flow's `env`, plus its own `env` — most specific wins. Commands are expanded against that merged mapping before they reach the shell, so `${VAR:-default}` behaves the same everywhere. A malformed interpolation, like an unclosed `${`, is rejected at load time, and `--strict-env` turns "typo'd variable expands to nothing" into a pre-run error naming the step and the variable.
-
-**You can see what happened.** Each step captures its combined stdout/stderr tail. A failed step always prints its tail under its report line; `--show-output` prints successful steps' tails too, and the `--json` summary and `--report` file carry an `output` field per step. If you want the whole story, `--output-dir DIR` appends each attempt's full output to `DIR/<step>.log` (step names sanitized to safe file names) and the JSON report points at the file via `output_file` — memory keeps the tail, disk keeps everything.
-
-**Some steps only run at the end.** `"trigger": "on_failure"` holds a step out of the normal pass and runs it only when some normal step failed, `"on_success"` only when the normal pass fully succeeded, and `"finally"` either way — the place for cleanup and notify work, pinned to the run's outcome. Hooks run sequentially in dependency order after the normal pass. A failed, gated-off, or condition-false hook skips its own hook dependents but never stops the other hooks (fail-fast would only hide cleanup), and hooks whose trigger does not match the outcome report as skipped. Hooks can depend only on other hooks, normal steps cannot depend on hooks, and both are rejected at load time. Dry-run lists hooks under their own "end of run" heading, and text/JSON results carry the trigger.
-
-**Steps can be conditional, and you can run a subset.** A step can carry a `when` condition — `{"when": {"env": "DEPLOY", "equals": "yes"}}` or `{"when": {"env": "DRY", "set": false}}` — evaluated against the merged environment at run time; a false condition skips the step and its dependents without failing the flow. `--only a,b` runs the named steps plus their transitive dependencies; `--skip c` runs everything else (c's dependents skip too). `--dry-run` shows the selection and annotates conditions, so the plan is reviewable before anything runs.
-
-## Using it from Python
-
-```python
-from flowkit.model import load_flow
-from flowkit.runner import run_flow
-
-flow = load_flow({"name": "demo", "steps": [{"name": "a", "command": "make"}]})
-result = run_flow(flow)
-print(result.status)  # "succeeded" or "failed"
-```
-
-## Tests
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-123 tests cover flow validation (unknown keys, duplicates, dangling deps, cycles, trigger/dependency mismatches), topological ordering, retries, timeouts, skip/fail-fast semantics, end-phase hook execution (on_failure/on_success/finally gating, cascade and isolation between hooks, conditions and selection), layered environments, output capture, and the CLI exit codes.
-
-## What's in the repo
-
-```
-flowkit/
-  model.py     # flow definitions, validation, topological order
-  runner.py    # sequential execution, retries, timeouts, skip semantics
-  report.py    # text and JSON run summaries
-  __main__.py  # CLI
-tests/         # unittest suite, no external dependencies
-examples/      # sample flow definitions
-```
+Tests: `python -m unittest discover -s tests`
